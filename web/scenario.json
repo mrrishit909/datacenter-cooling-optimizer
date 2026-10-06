@@ -1,0 +1,67 @@
+{
+ "service": "datacenter-cooling-optimizer",
+ "run": "demo-1",
+ "tokens": {
+  "manager": "hall-facility_manager-demo",
+  "operator": "hall-operator-demo",
+  "viewer": "hall-viewer-demo"
+ },
+ "steps": [
+  {
+   "title": "A hall of 48 racks and four CRACs",
+   "say": "An invented colocation hall: four rows of twelve racks in two cold aisles, a CRAC unit at each end of each aisle, CPU and storage in every rack and 8-GPU training servers in some. Sixty days of hourly telemetry come with it: inlet temperature at the top of every rack, power on each rack's CPU and GPU branches, each CRAC's supply temperature and status, including one eight-hour maintenance stop per unit. Then a batch of live readings is checked one by one: an unknown sensor, an impossible temperature and a timestamp from the future are refused.",
+   "calls": [
+    {"key": "load", "as": "manager", "method": "POST", "path": "/v1/facilities/load", "body": {"external_ref": "LARKSPUR-HALL-1", "name": "Hall 1", "seed": 19}},
+    {"key": "hall", "as": "viewer", "method": "GET", "path": "/v1/facilities/{{load.result.facility_id}}"},
+    {"key": "tele", "as": "operator", "method": "POST", "path": "/v1/telemetry", "body": {"facility_id": "{{load.result.facility_id}}", "readings": [
+      {"sensor": "A01-inlet", "at": "{{now}}", "value": 21.4},
+      {"sensor": "CRAC-2-supply", "at": "{{now}}", "value": 18.1},
+      {"sensor": "Z99-inlet", "at": "{{now}}", "value": 20.0},
+      {"sensor": "B07-inlet", "at": "{{now}}", "value": 85.0},
+      {"sensor": "C03-gpu", "at": "2099-01-01T00:00:00Z", "value": 9.5}]}}
+   ]
+  },
+  {
+   "title": "Sixty days of sensors, one thermal model",
+   "say": "A thermal surrogate per rack, fitted to the readings alone: the supply air of each unit, which units were stopped, and the power of every rack in the same aisle. Fitted on fifty days, checked on the last ten, and checked again on each CRAC's maintenance window with that window held out. It is promoted only if it beats the design rule of thumb, supply air plus a degree and a half. The simulated hall's true temperatures are shown alongside; the fit never sees them.",
+   "calls": [
+    {"key": "fit", "as": "operator", "method": "POST", "path": "/v1/thermal/models/fit", "body": {"facility_id": "{{load.result.facility_id}}"}}
+   ]
+  },
+  {
+   "title": "Twenty-four GPU servers arrive",
+   "say": "Six training jobs, 24 servers of 10 kW, each job inside one row so its GPUs share a network. The scheduler's default packs them into the first row with room, from the west end. The thermal-aware plan is a MILP that minimises the hottest predicted inlet. The surge takes the hall far past any load in its history, so the model is extrapolating: the safety margin doubles, and each aisle's airflow is held under 85% of what its units deliver. Both plans are run through the simulated hall's next day.",
+   "calls": [
+    {"key": "place", "as": "operator", "method": "POST", "path": "/v1/placements/optimize", "body": {"facility_id": "{{load.result.facility_id}}", "jobs": [
+      {"name": "llm-pretrain", "servers": 8, "priority": 3}, {"name": "vision-ft", "servers": 4, "priority": 2}, {"name": "rec-sys", "servers": 4, "priority": 2},
+      {"name": "speech", "servers": 4, "priority": 2}, {"name": "rl-sweep", "servers": 2, "priority": 1}, {"name": "eval", "servers": 2, "priority": 0}]}},
+    {"key": "fc", "as": "viewer", "method": "GET", "path": "/v1/thermal/forecast?decision_id={{place.thermal_aware.decision_id}}"}
+   ]
+  },
+  {
+   "title": "Run the hall warmer",
+   "say": "With the GPUs placed, the set-points go as high as the predicted inlets allow, every rack the margin under 27 °C, the ASHRAE recommended maximum. Cooling energy follows the chiller's efficiency curve, priced at tomorrow's hourly price and carbon. The plan is applied automatically because it stays inside the policy bounds; the simulated hall says whether it was right.",
+   "calls": [
+    {"key": "cool", "as": "operator", "method": "POST", "path": "/v1/cooling/plan", "body": {"facility_id": "{{load.result.facility_id}}"}}
+   ]
+  },
+  {
+   "title": "CRAC-1 stops",
+   "say": "First the what-if on the model: CRAC-1 stops at the afternoon peak. The model predicts nothing over the limit, but it has only ever seen a unit stopped at far lower load, and it says so. Then the simulated hall loses CRAC-1. The automatic response is the runbook: every running unit to 16 °C. Ten minutes later the sensors report, the model is corrected with what they show, and a re-plan proposes set-points and the smallest GPU power caps that bring every rack back under the limit.",
+   "calls": [
+    {"key": "whatif", "as": "operator", "method": "POST", "path": "/v1/twin/simulate", "body": {"facility_id": "{{load.result.facility_id}}", "fail_unit": "CRAC-1"}},
+    {"key": "fail", "as": "manager", "method": "POST", "path": "/v1/room/events", "body": {"facility_id": "{{load.result.facility_id}}", "kind": "crac_failure", "unit": "CRAC-1"}}
+   ]
+  },
+  {
+   "title": "Approval, energy and the audit trail",
+   "say": "Power caps slow customers' training jobs, so the operator cannot apply them; the facility manager can. Once approved, the hall runs the day on the re-plan. Then the hall's energy as it stands, and every step in a hash-chained audit log.",
+   "calls": [
+    {"key": "self", "expect_error": true, "as": "operator", "method": "POST", "path": "/v1/decisions/{{fail.result.decision_id}}/approve", "body": {"note": "applying my own caps"}},
+    {"key": "approve", "as": "manager", "method": "POST", "path": "/v1/decisions/{{fail.result.decision_id}}/approve", "body": {"note": "Approved: caps on aisle 1 GPUs until CRAC-1 is repaired; customers notified"}},
+    {"key": "pue", "as": "viewer", "method": "GET", "path": "/v1/facilities/{{load.result.facility_id}}/pue"},
+    {"key": "audit", "as": "manager", "method": "GET", "path": "/v1/audit?limit=12"}
+   ]
+  }
+ ]
+}
